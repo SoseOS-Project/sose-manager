@@ -1,0 +1,3 @@
+[workspace]
+members = ["xenstore", "svmd", "tools/svm-ls"]
+resolver = "3"
