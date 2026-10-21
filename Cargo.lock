@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "svm"
+version = "0.1.0"
+dependencies = [
+ "svm-client",
+]
+
+[[package]]
+name = "svm-client"
+version = "0.1.0"
+
+[[package]]
 name = "svm-ls"
 version = "0.1.0"
 dependencies = [
@@ -13,7 +24,7 @@ dependencies = [
 name = "svmd"
 version = "0.1.0"
 dependencies = [
- "xenstore",
+ "svm-client",
 ]
 
 [[package]]

@@ -6,9 +6,6 @@
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 
-// svmd's socket, the svm tools connect to this
-pub const SVM_SOCK_PATH: &str = "/run/svmd.sock";
-
 // message types, the number is the position in enum xsd_sockmsg_type
 pub const XS_READ: u32 = 2;
 pub const XS_DIRECTORY: u32 = 1;

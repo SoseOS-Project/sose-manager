@@ -12,7 +12,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::Command;
 use std::thread;
 
-use xenstore::SVM_SOCK_PATH;
+use svm_client::SVM_SOCK_PATH;
 
 // one xl config per vm. the name = "..." inside has to match the file name
 const VM_DIR: &str = "/etc/sose/vms";
