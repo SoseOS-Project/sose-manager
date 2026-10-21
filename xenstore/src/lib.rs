@@ -42,7 +42,12 @@ fn build_request(msg_type: u32, path: &str, value: &[u8]) -> Vec<u8> {
 
 // sends one request and gives back the reply payload.
 // if xenstored says no you get an Err with its error name (ENOENT etc)
-pub fn xs_request(stream: &mut UnixStream, msg_type: u32, path: &str, value: &[u8]) -> std::io::Result<Vec<u8>> {
+pub fn xs_request(
+    stream: &mut UnixStream,
+    msg_type: u32,
+    path: &str,
+    value: &[u8],
+) -> std::io::Result<Vec<u8>> {
     let msg = build_request(msg_type, path, value);
     stream.write_all(&msg)?;
 
@@ -58,9 +63,10 @@ pub fn xs_request(stream: &mut UnixStream, msg_type: u32, path: &str, value: &[u
 
     // error replies are just the error name as text, like "ENOENT\0"
     if reply_type == XS_ERROR {
-        let msg = String::from_utf8_lossy(&payload).trim_end_matches('\0').to_string();
+        let msg = String::from_utf8_lossy(&payload)
+            .trim_end_matches('\0')
+            .to_string();
         return Err(std::io::Error::other(msg));
-
     }
 
     Ok(payload)
@@ -74,6 +80,11 @@ mod tests {
     #[test]
     fn write_request() {
         let msg = build_request(XS_WRITE, "a", b"hi");
-        assert_eq!(msg, vec![11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 97, 0, 104, 105]);
+        assert_eq!(
+            msg,
+            vec![
+                11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 97, 0, 104, 105
+            ]
+        );
     }
 }

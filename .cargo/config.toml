@@ -1,0 +1,6 @@
+# use the crates in vendor/ instead of downloading them, buildroot builds offline
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"

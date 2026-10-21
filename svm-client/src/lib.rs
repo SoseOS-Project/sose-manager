@@ -20,8 +20,9 @@ pub fn svm_request(line: &str) -> std::io::Result<String> {
         let done = l == "ok" || l.starts_with("err");
         reply.push_str(&l);
         reply.push('\n');
-        if done { break };
+        if done {
+            break;
+        };
     }
     Ok(reply)
 }
-

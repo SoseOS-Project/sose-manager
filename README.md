@@ -9,6 +9,7 @@ Early and changing a lot, but it works. Runs on ARM64 under Xen (tested in QEMU)
 - `xenstore/` - small Rust client for xenstored's socket protocol, written from the Xen docs. read, directory and write work.
 - `svmd/` - the VM manager daemon. Listens on `/run/svmd.sock` and starts/stops VMs.
 - `svm-client/` - the bits svmd and its tools share (socket path, request helper).
+- `utils/` - terminal helpers: colors (only on a real terminal, respects NO_COLOR) and aligned tables.
 - `tools/svm/` - command line client for svmd, `svm start <name>` etc. (work in progress)
 - `tools/svm-ls/` - lists running domains and their names, like a tiny `xl list`.
 
@@ -31,6 +32,8 @@ socat - UNIX-CONNECT:/run/svmd.sock
 ```
 
 ## Building
+
+Outside crates are vendored in `vendor/` so everything builds offline.
 
 ```
 cargo build --release --target aarch64-unknown-linux-gnu
