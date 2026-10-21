@@ -20,6 +20,33 @@ use xenstore::{XENSTORED_SOCKET, XS_DIRECTORY, XS_READ, xs_request};
 
 // one xl config per vm. the name = "..." inside has to match the file name
 const VM_DIR: &str = "/etc/sose/vms";
+// autostart file
+const AUTOSTART_FILE: &str = "/etc/sose/autostart";
+
+// starts every vm listed in AUTOSTART_FILE, one name per line.
+// no file = nothing to start, that's fine
+fn autostart() {
+    let Ok(text) = std::fs::read_to_string(AUTOSTART_FILE) else {
+        return;
+    };
+
+    for name in text.lines() {
+        let name = name.trim();
+        // skip blank lines instead of stopping at them
+        if name.is_empty() {
+            continue;
+        }
+
+        // same path as "svm start <name>", so the name check still applies
+        let reply = handle(&format!("start {name}"));
+        let time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        println!("{time} autostart {name} -> {}", reply.lines().last().unwrap_or(""));
+    }
+}
 
 // memory (KiB) and vcpu count for a running domain
 fn domain_info(id: &str) -> std::io::Result<(String, usize)> {
@@ -221,6 +248,9 @@ fn main() -> std::io::Result<()> {
 
     // Permission bindings so normal users cannot access the svm sock path.
     set_permissions(SVM_SOCK_PATH, Permissions::from_mode(0o600))?;
+
+    // Autostart function.
+    autostart();
 
     for stream in listener.incoming() {
         match stream {
