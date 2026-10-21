@@ -8,10 +8,12 @@
 // every reply ends with a line that's "ok" or starts with "err"
 
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::Command;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::fs::{set_permissions, Permissions};
 
 use svm_client::SVM_SOCK_PATH;
 use xenstore::{XENSTORED_SOCKET, XS_DIRECTORY, XS_READ, xs_request};
@@ -216,6 +218,9 @@ fn main() -> std::io::Result<()> {
     // old socket file from a previous run makes bind() fail
     let _ = std::fs::remove_file(SVM_SOCK_PATH);
     let listener = UnixListener::bind(SVM_SOCK_PATH)?;
+
+    // Permission bindings so normal users cannot access the svm sock path.
+    set_permissions(SVM_SOCK_PATH, Permissions::from_mode(0o600))?;
 
     for stream in listener.incoming() {
         match stream {
