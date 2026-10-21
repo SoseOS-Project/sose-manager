@@ -18,6 +18,38 @@ use xenstore::{XS_DIRECTORY, XENSTORED_SOCKET, XS_READ, xs_request};
 // one xl config per vm. the name = "..." inside has to match the file name
 const VM_DIR: &str = "/etc/sose/vms";
 
+// memory (KiB) and vcpu count for a running domain
+fn domain_info(id: &str) -> std::io::Result<(String, usize)> {
+    let mut stream = UnixStream::connect(XENSTORED_SOCKET)?;
+
+    let mem = xs_request(&mut stream, XS_READ, &format!("/local/domain/{id}/memory/target"), &[])?;
+    let cpus = xs_request(&mut stream, XS_DIRECTORY, &format!("/local/domain/{id}/cpu"), &[])?;
+
+    let mem = String::from_utf8_lossy(&mem).into_owned();
+    let vcpus = String::from_utf8_lossy(&cpus).split('\0').filter(|c| !c.is_empty()).count();
+
+    Ok((mem, vcpus))
+}
+
+fn domid_of(name: &str) -> std::io::Result<Option<String>> {
+    let mut stream = UnixStream::connect(XENSTORED_SOCKET)?;
+    let payload = xs_request(&mut stream, XS_DIRECTORY, "/local/domain", &[])?;
+    let text = String::from_utf8_lossy(&payload);
+
+    for id in text.split('\0') {
+        if id.is_empty() { continue; }
+
+        let path = format!("/local/domain/{}/name", id);
+        let name_maybe = xs_request(&mut stream, XS_READ, &path, &[])?;
+
+        if String::from_utf8_lossy(&name_maybe) == name {
+            return Ok(Some(id.to_string()));
+        }
+    }
+
+    Ok(None)
+}
+
 fn running_vms() -> std::io::Result<Vec<String>> {
     let mut names = Vec::new();
 
@@ -38,6 +70,22 @@ fn running_vms() -> std::io::Result<Vec<String>> {
     }
 
     Ok(names)
+}
+
+fn status(name: &str) -> String {
+    let id = match domid_of(name) {
+        Ok(Some(id)) => id,
+        Ok(None) => return "state stopped\nok".to_string(),
+        Err(e) => return format!("err xenstore: {e}"),
+    };
+
+    let (mem, vcpus) = match domain_info(&id) {
+        Ok(info) => info,
+        Err(e) => return format!("err xenstore: {e}"),
+    };
+    let mem_trim = mem.trim().parse::<u64>().unwrap_or(0) / 1024;
+
+    format!("memory {mem_trim} MiB\nvcpus {vcpus}\nok")
 }
 
 // names go into file paths and xl args, so no "/" or ".." or anything weird
@@ -92,6 +140,7 @@ fn handle(line: &str) -> String {
         "start" | "stop" if !valid_name(arg) => Err("bad vm name".to_string()),
         "start" => xl(&["create", &format!("{VM_DIR}/{arg}.cfg")]),
         "stop" => xl(&["destroy", arg]),
+        "status" => return status(arg),
         _ => Err("unknown command".to_string()),
     };
 

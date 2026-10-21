@@ -8,10 +8,13 @@ use std::env;
 
 use svm_client::svm_request;
 
-
-
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = env::args().collect();
+
+    if args.len() < 2 {
+        eprintln!("No arguments supplied...");
+        return Ok(())
+    }
 
     // args[0] is the program itself, so skip it and glue the rest back into one line
     let cmd = args[1..].join(" ");

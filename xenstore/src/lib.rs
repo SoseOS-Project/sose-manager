@@ -66,7 +66,6 @@ pub fn xs_request(stream: &mut UnixStream, msg_type: u32, path: &str, value: &[u
     Ok(payload)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
