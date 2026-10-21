@@ -13,9 +13,32 @@ use std::process::Command;
 use std::thread;
 
 use svm_client::SVM_SOCK_PATH;
+use xenstore::{XS_DIRECTORY, XENSTORED_SOCKET, XS_READ, xs_request};
 
 // one xl config per vm. the name = "..." inside has to match the file name
 const VM_DIR: &str = "/etc/sose/vms";
+
+fn running_vms() -> std::io::Result<Vec<String>> {
+    let mut names = Vec::new();
+
+    // Reusing all of the same logic from svm-ls
+    let mut stream = UnixStream::connect(XENSTORED_SOCKET)?;
+    let payload = xs_request(&mut stream,XS_DIRECTORY, "/local/domain", &[])?;
+
+    let text = String::from_utf8_lossy(&payload);
+    let ids = text.split('\0');
+
+    for id in ids {
+        if id.is_empty() { continue; }
+
+        let path = format!("/local/domain/{}/name", id);
+        let name  = xs_request(&mut stream,XS_READ, &path, &[])?;
+
+        names.push(String::from_utf8_lossy(&name).into_owned());
+    }
+
+    Ok(names)
+}
 
 // names go into file paths and xl args, so no "/" or ".." or anything weird
 fn valid_name(name: &str) -> bool {
@@ -53,10 +76,16 @@ fn handle(line: &str) -> String {
 
     let result = match cmd {
         "list" => {
+
+            let running = match running_vms() {
+                Ok(names) => names,
+                Err(e) => return format!("err xenstore: {e}"),
+            };
+
             let mut reply = String::new();
             for name in defined_vms() {
-                reply.push_str(&name);
-                reply.push('\n');
+                let state = if running.contains(&name) { "running" } else { "stopped" };
+                reply.push_str(&format!("{name} {state}\n"));
             }
             return reply + "ok";
         }

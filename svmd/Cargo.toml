@@ -6,3 +6,4 @@ license = "GPL-2.0-only"
 
 [dependencies]
 svm-client = { path = "../svm-client" }
+xenstore = { path = "../xenstore" }
