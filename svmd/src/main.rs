@@ -203,6 +203,7 @@ fn handle(line: &str) -> String {
         "start" => xl(&["create", &format!("{VM_DIR}/{arg}.cfg")]),
         "stop" => xl(&["destroy", arg]),
         "status" => return status(arg),
+        "autostart" => return autostart_cmd(arg),
         _ => Err("unknown command".to_string()),
     };
 
@@ -211,6 +212,64 @@ fn handle(line: &str) -> String {
         // xl errors can be a few lines long, keep the reply on one line
         Err(err) => format!("err {}", err.replace('\n', " ")),
     }
+}
+
+fn autostart_cmd(arg: &str) -> String {
+    let (action, name) = arg.split_once(' ').unwrap_or((arg, ""));
+
+    match action {
+        "set" => {
+            if !valid_name(name) {
+                return "err bad vm name".to_string();
+            }
+            if !defined_vms().iter().any(|vm| vm == name) {
+                return "err unknown vm".to_string();
+            }
+
+            let mut text = std::fs::read_to_string(AUTOSTART_FILE).unwrap_or_default();
+
+            if text.lines().any(|line| line.trim() == name) {
+                return "ok".to_string()
+            }
+
+            text.push_str(name);
+            text.push('\n');
+
+            if let Err(e) = std::fs::write(AUTOSTART_FILE, text) {
+                return format!("err {e}")
+            }
+            "ok".to_string()
+        },
+        "remove" => {
+            if !valid_name(name) {
+                return "err bad vm name".to_string();
+            }
+            if !defined_vms().iter().any(|vm| vm == name) {
+                return "err unknown vm".to_string();
+            }
+
+            let text = std::fs::read_to_string(AUTOSTART_FILE).unwrap_or_default();
+            let others = text.lines().filter(|line| line.trim() != name);
+
+            if let Err(e) = std::fs::write(AUTOSTART_FILE, others.collect::<Vec<_>>().join("\n") + "\n") {
+                return format!("err {e}");
+            }
+            "ok".to_string()
+        },
+        "list" => {
+            let text = std::fs::read_to_string(AUTOSTART_FILE).unwrap_or_default();
+            let mut reply = String::new();
+
+            for line in text.lines() {
+                reply.push_str(&format!("{line}\n"));
+            }
+
+            reply.push_str("ok");
+            reply
+        }
+        _ => "err usage: autostart set|remove <name> | list".to_string(),
+    }
+
 }
 
 fn client_handler(stream: UnixStream) {
