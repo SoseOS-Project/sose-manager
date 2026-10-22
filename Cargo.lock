@@ -21,13 +21,6 @@ name = "svm-client"
 version = "0.1.0"
 
 [[package]]
-name = "svm-ls"
-version = "0.1.0"
-dependencies = [
- "xenstore",
-]
-
-[[package]]
 name = "svmd"
 version = "0.1.0"
 dependencies = [
