@@ -1,9 +1,13 @@
 // svmd: the vm manager daemon. tools send it text commands over /run/svmd.sock,
 // one per line, and it starts/stops vms with xl.
 //
-//   list          -> vm names, then "ok"
-//   start <name>  -> xl create /etc/sose/vms/<name>.cfg
-//   stop <name>   -> xl destroy <name>
+//   list                     -> every vm and if it's running or stopped
+//   start <name>             -> xl create /etc/sose/vms/<name>.cfg
+//   stop <name>              -> xl destroy <name>
+//   status <name>            -> memory and vcpus of one vm
+//   autostart set <name>     -> start this vm at boot
+//   autostart remove <name>  -> don't start it at boot anymore
+//   autostart list           -> what starts at boot
 //
 // every reply ends with a line that's "ok" or starts with "err"
 
@@ -18,10 +22,15 @@ use std::fs::{set_permissions, Permissions};
 use svm_client::SVM_SOCK_PATH;
 use xenstore::{XENSTORED_SOCKET, XS_DIRECTORY, XS_READ, xs_request};
 
+
 // one xl config per vm. the name = "..." inside has to match the file name
 const VM_DIR: &str = "/etc/sose/vms";
-// autostart file
+
+// vms to start at boot, one name per line.
+// dom0 runs from RAM so changes to this file are gone after a reboot,
+// the real copy lives in the buildroot overlay until there's a settings disk
 const AUTOSTART_FILE: &str = "/etc/sose/autostart";
+
 
 // starts every vm listed in AUTOSTART_FILE, one name per line.
 // no file = nothing to start, that's fine
@@ -32,6 +41,7 @@ fn autostart() {
 
     for name in text.lines() {
         let name = name.trim();
+
         // skip blank lines instead of stopping at them
         if name.is_empty() {
             continue;
@@ -39,14 +49,17 @@ fn autostart() {
 
         // same path as "svm start <name>", so the name check still applies
         let reply = handle(&format!("start {name}"));
+
         let time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
+        // goes to /var/log/svmd.log like every other command
         println!("{time} autostart {name} -> {}", reply.lines().last().unwrap_or(""));
     }
 }
+
 
 // memory (KiB) and vcpu count for a running domain
 fn domain_info(id: &str) -> std::io::Result<(String, usize)> {
@@ -58,6 +71,8 @@ fn domain_info(id: &str) -> std::io::Result<(String, usize)> {
         &format!("/local/domain/{id}/memory/target"),
         &[],
     )?;
+
+    // cpu/ has one child per vcpu (0, 1, ...), so counting them = vcpu count
     let cpus = xs_request(
         &mut stream,
         XS_DIRECTORY,
@@ -74,6 +89,8 @@ fn domain_info(id: &str) -> std::io::Result<(String, usize)> {
     Ok((mem, vcpus))
 }
 
+// finds the domain id of a running vm by its name.
+// None = no running domain with that name
 fn domid_of(name: &str) -> std::io::Result<Option<String>> {
     let mut stream = UnixStream::connect(XENSTORED_SOCKET)?;
     let payload = xs_request(&mut stream, XS_DIRECTORY, "/local/domain", &[])?;
@@ -87,6 +104,7 @@ fn domid_of(name: &str) -> std::io::Result<Option<String>> {
         let path = format!("/local/domain/{}/name", id);
         let name_maybe = xs_request(&mut stream, XS_READ, &path, &[])?;
 
+        // first match wins, no need to look at the rest
         if String::from_utf8_lossy(&name_maybe) == name {
             return Ok(Some(id.to_string()));
         }
@@ -95,6 +113,7 @@ fn domid_of(name: &str) -> std::io::Result<Option<String>> {
     Ok(None)
 }
 
+// names of every running domain (Domain-0 included)
 fn running_vms() -> std::io::Result<Vec<String>> {
     let mut names = Vec::new();
 
@@ -119,12 +138,15 @@ fn running_vms() -> std::io::Result<Vec<String>> {
     Ok(names)
 }
 
+
+// reply for "status <name>"
 fn status(name: &str) -> String {
     // without this, any made up name would just show up as "stopped"
     if !defined_vms().iter().any(|vm| vm == name) {
         return "err unknown vm".to_string();
     }
 
+    // not in xenstore = not running
     let id = match domid_of(name) {
         Ok(Some(id)) => id,
         Ok(None) => return "state stopped\nok".to_string(),
@@ -135,6 +157,8 @@ fn status(name: &str) -> String {
         Ok(info) => info,
         Err(e) => return format!("err xenstore: {e}"),
     };
+
+    // xenstore gives KiB, /1024 = MiB
     let mem_trim = mem.trim().parse::<u64>().unwrap_or(0) / 1024;
 
     format!("memory {mem_trim} MiB\nvcpus {vcpus}\nok")
@@ -176,12 +200,15 @@ fn defined_vms() -> Vec<String> {
     names
 }
 
+
 // one command line in, reply out
 fn handle(line: &str) -> String {
     let (cmd, arg) = line.split_once(' ').unwrap_or((line, ""));
 
     let result = match cmd {
         "list" if !arg.is_empty() => Err("list doesn't take a name".to_string()),
+
+        // every defined vm + running/stopped
         "list" => {
             let running = match running_vms() {
                 Ok(names) => names,
@@ -199,11 +226,15 @@ fn handle(line: &str) -> String {
             }
             return reply + "ok";
         }
+
         "start" | "stop" | "status" if !valid_name(arg) => Err("bad vm name".to_string()),
         "start" => xl(&["create", &format!("{VM_DIR}/{arg}.cfg")]),
         "stop" => xl(&["destroy", arg]),
+
+        // these build their own full reply
         "status" => return status(arg),
         "autostart" => return autostart_cmd(arg),
+
         _ => Err("unknown command".to_string()),
     };
 
@@ -214,10 +245,12 @@ fn handle(line: &str) -> String {
     }
 }
 
+// reply for "autostart set|remove <name>" and "autostart list"
 fn autostart_cmd(arg: &str) -> String {
     let (action, name) = arg.split_once(' ').unwrap_or((arg, ""));
 
     match action {
+        // add a vm to the autostart file (only once)
         "set" => {
             if !valid_name(name) {
                 return "err bad vm name".to_string();
@@ -228,6 +261,7 @@ fn autostart_cmd(arg: &str) -> String {
 
             let mut text = std::fs::read_to_string(AUTOSTART_FILE).unwrap_or_default();
 
+            // already in there, nothing to do
             if text.lines().any(|line| line.trim() == name) {
                 return "ok".to_string()
             }
@@ -240,6 +274,8 @@ fn autostart_cmd(arg: &str) -> String {
             }
             "ok".to_string()
         },
+
+        // rewrite the file with every line except this vm
         "remove" => {
             if !valid_name(name) {
                 return "err bad vm name".to_string();
@@ -256,6 +292,8 @@ fn autostart_cmd(arg: &str) -> String {
             }
             "ok".to_string()
         },
+
+        // one name per line, then ok
         "list" => {
             let text = std::fs::read_to_string(AUTOSTART_FILE).unwrap_or_default();
             let mut reply = String::new();
@@ -267,11 +305,13 @@ fn autostart_cmd(arg: &str) -> String {
             reply.push_str("ok");
             reply
         }
+
         _ => "err usage: autostart set|remove <name> | list".to_string(),
     }
 
 }
 
+// one thread per connected client, handles its commands until it disconnects
 fn client_handler(stream: UnixStream) {
     for line in BufReader::new(&stream).lines() {
         match line {
@@ -280,11 +320,13 @@ fn client_handler(stream: UnixStream) {
                 let line = line.trim();
 
                 let reply = handle(line);
+
                 let time = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
 
+                // log: time, command, last line of the reply (ok / err ...)
                 println!("{time} {} -> {}", line, reply.lines().last().unwrap_or(""));
 
                 if let Err(err) = writeln!(&stream, "{}", reply) {
@@ -300,6 +342,8 @@ fn client_handler(stream: UnixStream) {
         }
     }
 }
+
+
 fn main() -> std::io::Result<()> {
     // old socket file from a previous run makes bind() fail
     let _ = std::fs::remove_file(SVM_SOCK_PATH);
@@ -308,7 +352,7 @@ fn main() -> std::io::Result<()> {
     // Permission bindings so normal users cannot access the svm sock path.
     set_permissions(SVM_SOCK_PATH, Permissions::from_mode(0o600))?;
 
-    // Autostart function.
+    // start the vms listed in the autostart file before taking commands
     autostart();
 
     for stream in listener.incoming() {
