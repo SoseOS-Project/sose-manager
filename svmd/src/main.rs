@@ -27,9 +27,8 @@ use xenstore::{XENSTORED_SOCKET, XS_DIRECTORY, XS_READ, xs_request};
 const VM_DIR: &str = "/etc/sose/vms";
 
 // vms to start at boot, one name per line.
-// dom0 runs from RAM so changes to this file are gone after a reboot,
-// the real copy lives in the buildroot overlay until there's a settings disk
-const AUTOSTART_FILE: &str = "/etc/sose/autostart";
+// dom0 runs from RAM but stays persistent under /var/lib/sose
+const AUTOSTART_FILE: &str = "/var/lib/sose/autostart";
 
 
 // starts every vm listed in AUTOSTART_FILE, one name per line.
