@@ -9,7 +9,7 @@
 use std::env;
 
 use svm_client::svm_request;
-use utils::{paint, table, Cell, Style};
+use utils::{Cell, Style, paint, table};
 
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = env::args().collect();
@@ -55,14 +55,24 @@ fn print_reply(cmd: &str, reply: &str) {
             "list" => {
                 let rows: Vec<Vec<Cell>> = pairs
                     .iter()
-                    .map(|(name, state)| vec![Cell::new(name, Style::Plain), Cell::new(state, state_style(state))])
+                    .map(|(name, state)| {
+                        vec![
+                            Cell::new(name, Style::Plain),
+                            Cell::new(state, state_style(state)),
+                        ]
+                    })
                     .collect();
                 table(&["NAME", "STATE"], &rows)
             }
             "status" => {
                 let rows: Vec<Vec<Cell>> = pairs
                     .iter()
-                    .map(|(key, value)| vec![Cell::new(key, Style::Dim), Cell::new(value, state_style(value))])
+                    .map(|(key, value)| {
+                        vec![
+                            Cell::new(key, Style::Dim),
+                            Cell::new(value, state_style(value)),
+                        ]
+                    })
                     .collect();
                 table(&["FIELD", "VALUE"], &rows)
             }

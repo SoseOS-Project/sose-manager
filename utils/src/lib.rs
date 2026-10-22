@@ -52,7 +52,10 @@ pub struct Cell {
 
 impl Cell {
     pub fn new(text: &str, style: Style) -> Cell {
-        Cell { text: text.to_string(), style }
+        Cell {
+            text: text.to_string(),
+            style,
+        }
     }
 }
 
