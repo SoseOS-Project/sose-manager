@@ -11,17 +11,16 @@
 //
 // every reply ends with a line that's "ok" or starts with "err"
 
+use std::fs::{Permissions, set_permissions};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::Command;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::fs::{set_permissions, Permissions};
 
 use svm_client::SVM_SOCK_PATH;
 use xenstore::{XENSTORED_SOCKET, XS_DIRECTORY, XS_READ, xs_request};
-
 
 // one xl config per vm. the name = "..." inside has to match the file name
 const VM_DIR: &str = "/etc/sose/vms";
@@ -29,7 +28,6 @@ const VM_DIR: &str = "/etc/sose/vms";
 // vms to start at boot, one name per line.
 // dom0 runs from RAM but stays persistent under /var/lib/sose
 const AUTOSTART_FILE: &str = "/var/lib/sose/autostart";
-
 
 // starts every vm listed in AUTOSTART_FILE, one name per line.
 // no file = nothing to start, that's fine
@@ -55,10 +53,12 @@ fn autostart() {
             .unwrap_or(0);
 
         // goes to /var/log/svmd.log like every other command
-        println!("{time} autostart {name} -> {}", reply.lines().last().unwrap_or(""));
+        println!(
+            "{time} autostart {name} -> {}",
+            reply.lines().last().unwrap_or("")
+        );
     }
 }
-
 
 // memory (KiB) and vcpu count for a running domain
 fn domain_info(id: &str) -> std::io::Result<(String, usize)> {
@@ -137,7 +137,6 @@ fn running_vms() -> std::io::Result<Vec<String>> {
     Ok(names)
 }
 
-
 // reply for "status <name>"
 fn status(name: &str) -> String {
     // without this, any made up name would just show up as "stopped"
@@ -199,7 +198,6 @@ fn defined_vms() -> Vec<String> {
     names
 }
 
-
 // one command line in, reply out
 fn handle(line: &str) -> String {
     let (cmd, arg) = line.split_once(' ').unwrap_or((line, ""));
@@ -227,12 +225,13 @@ fn handle(line: &str) -> String {
         }
 
         "start" | "stop" | "status" if !valid_name(arg) => Err("bad vm name".to_string()),
-        "start" => xl(&["create", &format!("{VM_DIR}/{arg}.cfg")]),
+        "start" => start_vm(arg),
         "stop" => xl(&["destroy", arg]),
 
         // these build their own full reply
         "status" => return status(arg),
         "autostart" => return autostart_cmd(arg),
+        "prefs" => return prefs_cmd(arg),
 
         _ => Err("unknown command".to_string()),
     };
@@ -242,6 +241,94 @@ fn handle(line: &str) -> String {
         // xl errors can be a few lines long, keep the reply on one line
         Err(err) => format!("err {}", err.replace('\n', " ")),
     }
+}
+
+// reply for "prefs <vm> <key> <value>", like qvm-prefs.
+// overrides get saved on the settings disk in /var/lib/sose/prefs/<vm> as key=value
+// lines, and start_vm adds them to `xl create` when the vm starts.
+//
+// todo: "prefs <vm>" with nothing after it should show the prefs
+fn prefs_cmd(arg: &str) -> String {
+    // name comes first here: "test memory 256" -> ("test", "memory 256")
+    let (name, rest) = arg.split_once(' ').unwrap_or((arg, ""));
+
+    // "memory 256" -> ("memory", "256"), a key without a value is a usage error
+    let Some((key, value)) = rest.split_once(' ') else {
+        return "err usage: prefs <vm> [memory|vcpus <number>]".to_string();
+    };
+
+    // the name ends up in a file path, so it has to be safe and a real vm.
+    // checked before anything touches the disk
+    if !valid_name(name) {
+        return "err bad vm name".to_string();
+    }
+    if !defined_vms().iter().any(|vm| vm == name) {
+        return "err unknown vm".to_string();
+    }
+
+    // only plain numbers above 0, these go straight onto the xl command line
+    let Ok(n) = value.parse::<u32>() else {
+        return "err value must be a number".to_string();
+    };
+
+    if n == 0 {
+        return "err cannot use a value below 1".to_string();
+    };
+
+    // whitelist, so a pref can't point a vm at some other kernel or disk
+    if !matches!(key, "memory" | "vcpus") {
+        return "err unknown pref".to_string();
+    };
+
+    // first time there's no prefs folder yet
+    if let Err(e) = std::fs::create_dir_all("/var/lib/sose/prefs") {
+        return format!("err {e}");
+    }
+
+    // no file yet just means no overrides
+    let read_prefs =
+        std::fs::read_to_string(format!("/var/lib/sose/prefs/{name}")).unwrap_or_default();
+    let mut new_prefs: Vec<String> = Vec::new();
+
+    // keep every line except the old one for this key
+    for line in read_prefs.lines() {
+        if !line.starts_with(&format!("{key}=")) {
+            new_prefs.push(line.to_string());
+        }
+    }
+
+    // then the new value goes at the end
+    new_prefs.push(format!("{key}={value}"));
+
+    if let Err(e) = std::fs::write(
+        format!("/var/lib/sose/prefs/{name}"),
+        new_prefs.join("\n") + "\n",
+    ) {
+        return format!("err {e}");
+    }
+
+    "ok".to_string()
+}
+
+// starts a vm with its prefs on top of the .cfg.
+// xl lets key=value after the cfg path override that setting:
+//   xl create /etc/sose/vms/test.cfg memory=256 vcpus=2
+fn start_vm(name: &str) -> Result<(), String> {
+    let mut args = vec!["create".to_string(), format!("{VM_DIR}/{name}.cfg")];
+
+    // no prefs file means the vm just uses its .cfg
+    let prefs_file =
+        std::fs::read_to_string(format!("/var/lib/sose/prefs/{name}")).unwrap_or_default();
+
+    // the file is already key=value lines, so each line is one more xl arg
+    for line in prefs_file.lines() {
+        args.push(line.to_string());
+    }
+
+    // xl() takes &str, so borrow each String (args still owns the text)
+    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+    xl(&refs)
 }
 
 // reply for "autostart set|remove <name>" and "autostart list"
@@ -262,17 +349,17 @@ fn autostart_cmd(arg: &str) -> String {
 
             // already in there, nothing to do
             if text.lines().any(|line| line.trim() == name) {
-                return "ok".to_string()
+                return "ok".to_string();
             }
 
             text.push_str(name);
             text.push('\n');
 
             if let Err(e) = std::fs::write(AUTOSTART_FILE, text) {
-                return format!("err {e}")
+                return format!("err {e}");
             }
             "ok".to_string()
-        },
+        }
 
         // rewrite the file with every line except this vm
         "remove" => {
@@ -286,11 +373,13 @@ fn autostart_cmd(arg: &str) -> String {
             let text = std::fs::read_to_string(AUTOSTART_FILE).unwrap_or_default();
             let others = text.lines().filter(|line| line.trim() != name);
 
-            if let Err(e) = std::fs::write(AUTOSTART_FILE, others.collect::<Vec<_>>().join("\n") + "\n") {
+            if let Err(e) =
+                std::fs::write(AUTOSTART_FILE, others.collect::<Vec<_>>().join("\n") + "\n")
+            {
                 return format!("err {e}");
             }
             "ok".to_string()
-        },
+        }
 
         // one name per line, then ok
         "list" => {
@@ -307,7 +396,6 @@ fn autostart_cmd(arg: &str) -> String {
 
         _ => "err usage: autostart set|remove <name> | list".to_string(),
     }
-
 }
 
 // one thread per connected client, handles its commands until it disconnects
@@ -341,7 +429,6 @@ fn client_handler(stream: UnixStream) {
         }
     }
 }
-
 
 fn main() -> std::io::Result<()> {
     // old socket file from a previous run makes bind() fail
