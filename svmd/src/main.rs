@@ -17,7 +17,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::Command;
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use svm_client::SVM_SOCK_PATH;
 use xenstore::{XENSTORED_SOCKET, XS_DIRECTORY, XS_READ, xs_request};
@@ -345,6 +345,13 @@ fn start_vm(name: &str) -> Result<(), String> {
             if netvm == "none" {
                 args.push("vif=[]".to_string())
             } else {
+                let running = running_vms().map_err(|e| e.to_string())?;
+
+                if !running.iter().any(|vm| vm == netvm) {
+                    start_vm(netvm)?;
+                    // todo: wait_ready(netvm)?; once wait_ready is finished
+                }
+
                 args.push(format!(
                     "vif=['backend={netvm},bridge=vmbr0,script=vif-sose']"
                 ))
@@ -358,6 +365,25 @@ fn start_vm(name: &str) -> Result<(), String> {
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
     xl(&refs)
+}
+
+// waits until a netvm says it's ready. its S99ready writes data/ready into its own
+// spot in xenstore once xl devd is up. gives up after 30 seconds
+fn wait_ready(name: &str) -> Result<(), String> {
+    let started = Instant::now();
+
+    loop {
+        // todo: find the vm's id with domid_of(name)
+        // todo: read /local/domain/<id>/data/ready with xs_request and XS_READ
+        // todo: if that read worked, it's ready: return Ok(())
+
+        if started.elapsed() > Duration::from_secs(30) {
+            return Err(format!("{name} didn't get ready in 30 seconds"));
+        }
+
+        // don't hammer xenstore, try again in a moment
+        thread::sleep(Duration::from_millis(200));
+    }
 }
 
 // reply for "autostart set|remove <name>" and "autostart list"
