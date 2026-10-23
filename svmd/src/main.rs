@@ -116,7 +116,7 @@ fn domid_of(name: &str) -> std::io::Result<Option<String>> {
 fn running_vms() -> std::io::Result<Vec<String>> {
     let mut names = Vec::new();
 
-    // Reusing all of the same logic from svm-ls
+    // every domain id is a folder under /local/domain, each one has a name key
     let mut stream = UnixStream::connect(XENSTORED_SOCKET)?;
     let payload = xs_request(&mut stream, XS_DIRECTORY, "/local/domain", &[])?;
 
@@ -254,7 +254,7 @@ fn prefs_cmd(arg: &str) -> String {
 
     // "memory 256" -> ("memory", "256"), a key without a value is a usage error
     let Some((key, value)) = rest.split_once(' ') else {
-        return "err usage: prefs <vm> [memory|vcpus <number>]".to_string();
+        return "err usage: prefs <vm> memory|vcpus <number> | netvm <vm|none>".to_string();
     };
 
     // the name ends up in a file path, so it has to be safe and a real vm.
@@ -266,19 +266,35 @@ fn prefs_cmd(arg: &str) -> String {
         return "err unknown vm".to_string();
     }
 
-    // only plain numbers above 0, these go straight onto the xl command line
-    let Ok(n) = value.parse::<u32>() else {
-        return "err value must be a number".to_string();
-    };
+    // each key has its own checks. anything not listed here is rejected,
+    // so a pref can't point a vm at some other kernel or disk
+    match key {
+        // only plain numbers above 0, these go straight onto the xl command line
+        "memory" | "vcpus" => {
+            let Ok(n) = value.parse::<u32>() else {
+                return "err value must be a number".to_string();
+            };
 
-    if n == 0 {
-        return "err cannot use a value below 1".to_string();
-    };
+            if n == 0 {
+                return "err cannot use a value below 1".to_string();
+            };
+        }
 
-    // whitelist, so a pref can't point a vm at some other kernel or disk
-    if !matches!(key, "memory" | "vcpus") {
-        return "err unknown pref".to_string();
-    };
+        // which vm this vm gets its network from
+        "netvm" => {
+            if value.is_empty() {
+                return "err cannot set null to netvm".to_string();
+            } else if value == name {
+                return "err cannot name to netvm".to_string();
+            }
+
+            if value != "none" && !defined_vms().iter().any(|vm| vm == value) {
+                return "err not a real vm".to_string();
+            }
+        }
+
+        _ => return "err unknown pref".to_string(),
+    }
 
     // first time there's no prefs folder yet
     if let Err(e) = std::fs::create_dir_all("/var/lib/sose/prefs") {
@@ -320,9 +336,22 @@ fn start_vm(name: &str) -> Result<(), String> {
     let prefs_file =
         std::fs::read_to_string(format!("/var/lib/sose/prefs/{name}")).unwrap_or_default();
 
-    // the file is already key=value lines, so each line is one more xl arg
+    // the file is key=value lines, most of them go to xl as they are
     for line in prefs_file.lines() {
-        args.push(line.to_string());
+        // except netvm, xl doesn't know that one. it becomes the vm's network card:
+        // none = no card at all, otherwise a card served by that vm (sys-net),
+        // plugged into its vmbr0 by vif-sose
+        if let Some(netvm) = line.strip_prefix("netvm=") {
+            if netvm == "none" {
+                args.push("vif=[]".to_string())
+            } else {
+                args.push(format!(
+                    "vif=['backend={netvm},bridge=vmbr0,script=vif-sose']"
+                ))
+            }
+        } else {
+            args.push(line.to_string());
+        }
     }
 
     // xl() takes &str, so borrow each String (args still owns the text)
