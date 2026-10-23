@@ -8,14 +8,16 @@
 //   autostart set <name>     -> start this vm at boot
 //   autostart remove <name>  -> don't start it at boot anymore
 //   autostart list           -> what starts at boot
+//   prefs <name> <key> <val> -> memory, vcpus or netvm for one vm, applied when it starts
 //
-// every reply ends with a line that's "ok" or starts with "err"
+// every reply ends with a line that's "ok" or starts with "err "
 
 use std::fs::{Permissions, set_permissions};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::Command;
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -28,6 +30,13 @@ const VM_DIR: &str = "/etc/sose/vms";
 // vms to start at boot, one name per line.
 // dom0 runs from RAM but stays persistent under /var/lib/sose
 const AUTOSTART_FILE: &str = "/var/lib/sose/autostart";
+
+// per-vm overrides from "prefs", one file per vm, key=value lines
+const PREFS_DIR: &str = "/var/lib/sose/prefs";
+
+// only one vm starts at a time. every client has its own thread, and two vms that
+// share a netvm would otherwise both try to start it, and the second one fails
+static START_LOCK: Mutex<()> = Mutex::new(());
 
 // starts every vm listed in AUTOSTART_FILE, one name per line.
 // no file = nothing to start, that's fine
@@ -100,8 +109,12 @@ fn domid_of(name: &str) -> std::io::Result<Option<String>> {
             continue;
         }
 
+        // a domain that's being destroyed can lose its name halfway through,
+        // skip it instead of failing the whole lookup
         let path = format!("/local/domain/{}/name", id);
-        let name_maybe = xs_request(&mut stream, XS_READ, &path, &[])?;
+        let Ok(name_maybe) = xs_request(&mut stream, XS_READ, &path, &[]) else {
+            continue;
+        };
 
         // first match wins, no need to look at the rest
         if String::from_utf8_lossy(&name_maybe) == name {
@@ -128,8 +141,11 @@ fn running_vms() -> std::io::Result<Vec<String>> {
             continue;
         }
 
+        // same as in domid_of: a domain going away might not have a name anymore
         let path = format!("/local/domain/{}/name", id);
-        let name = xs_request(&mut stream, XS_READ, &path, &[])?;
+        let Ok(name) = xs_request(&mut stream, XS_READ, &path, &[]) else {
+            continue;
+        };
 
         names.push(String::from_utf8_lossy(&name).into_owned());
     }
@@ -162,9 +178,11 @@ fn status(name: &str) -> String {
     format!("memory {mem_trim} MiB\nvcpus {vcpus}\nok")
 }
 
-// names go into file paths and xl args, so no "/" or ".." or anything weird
+// names go into file paths and xl args, so no "/" or ".." or anything weird.
+// "ok" is out too: alone on a line (autostart list) it looks like the end of a reply
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
+        && name != "ok"
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -225,7 +243,12 @@ fn handle(line: &str) -> String {
         }
 
         "start" | "stop" | "status" if !valid_name(arg) => Err("bad vm name".to_string()),
-        "start" => start_vm(arg),
+        "start" => {
+            // see START_LOCK. a poisoned lock just means another start panicked,
+            // starting is still fine
+            let _one_at_a_time = START_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            start_vm(arg, &mut Vec::new())
+        }
         "stop" => xl(&["destroy", arg]),
 
         // these build their own full reply
@@ -276,20 +299,20 @@ fn prefs_cmd(arg: &str) -> String {
             };
 
             if n == 0 {
-                return "err cannot use a value below 1".to_string();
+                return "err value must be 1 or more".to_string();
             };
         }
 
         // which vm this vm gets its network from
         "netvm" => {
             if value.is_empty() {
-                return "err cannot set null to netvm".to_string();
+                return "err netvm needs a vm name or none".to_string();
             } else if value == name {
-                return "err cannot name to netvm".to_string();
+                return "err a vm can't be its own netvm".to_string();
             }
 
             if value != "none" && !defined_vms().iter().any(|vm| vm == value) {
-                return "err not a real vm".to_string();
+                return "err unknown vm".to_string();
             }
         }
 
@@ -297,13 +320,12 @@ fn prefs_cmd(arg: &str) -> String {
     }
 
     // first time there's no prefs folder yet
-    if let Err(e) = std::fs::create_dir_all("/var/lib/sose/prefs") {
+    if let Err(e) = std::fs::create_dir_all(PREFS_DIR) {
         return format!("err {e}");
     }
 
     // no file yet just means no overrides
-    let read_prefs =
-        std::fs::read_to_string(format!("/var/lib/sose/prefs/{name}")).unwrap_or_default();
+    let read_prefs = std::fs::read_to_string(format!("{PREFS_DIR}/{name}")).unwrap_or_default();
     let mut new_prefs: Vec<String> = Vec::new();
 
     // keep every line except the old one for this key
@@ -316,10 +338,7 @@ fn prefs_cmd(arg: &str) -> String {
     // then the new value goes at the end
     new_prefs.push(format!("{key}={value}"));
 
-    if let Err(e) = std::fs::write(
-        format!("/var/lib/sose/prefs/{name}"),
-        new_prefs.join("\n") + "\n",
-    ) {
+    if let Err(e) = std::fs::write(format!("{PREFS_DIR}/{name}"), new_prefs.join("\n") + "\n") {
         return format!("err {e}");
     }
 
@@ -329,35 +348,62 @@ fn prefs_cmd(arg: &str) -> String {
 // starts a vm with its prefs on top of the .cfg.
 // xl lets key=value after the cfg path override that setting:
 //   xl create /etc/sose/vms/test.cfg memory=256 vcpus=2
-fn start_vm(name: &str) -> Result<(), String> {
+//
+// `chain` is every vm this start is already starting, so a netvm loop
+// (a uses b, b uses a) stops with an error instead of going around forever
+fn start_vm(name: &str, chain: &mut Vec<String>) -> Result<(), String> {
+    if chain.iter().any(|vm| vm == name) {
+        return Err(format!("netvm loop: {} -> {name}", chain.join(" -> ")));
+    }
+    chain.push(name.to_string());
+
+    // without this a made up name gets xl's "can't open config file" error
+    if !defined_vms().iter().any(|vm| vm == name) {
+        return Err("unknown vm".to_string());
+    }
+
+    // already running is fine, nothing to do. autostart can list a netvm that
+    // got started earlier by a vm that uses it
+    let running = running_vms().map_err(|e| e.to_string())?;
+    if running.iter().any(|vm| vm == name) {
+        return Ok(());
+    }
+
     let mut args = vec!["create".to_string(), format!("{VM_DIR}/{name}.cfg")];
 
     // no prefs file means the vm just uses its .cfg
-    let prefs_file =
-        std::fs::read_to_string(format!("/var/lib/sose/prefs/{name}")).unwrap_or_default();
+    let prefs_file = std::fs::read_to_string(format!("{PREFS_DIR}/{name}")).unwrap_or_default();
 
-    // the file is key=value lines, most of them go to xl as they are
+    // the prefs file is on the settings disk, outside the read-only image, so its
+    // lines get checked again here instead of trusting prefs_cmd. otherwise an
+    // edited file could hand xl something like kernel=/some/file
     for line in prefs_file.lines() {
-        // except netvm, xl doesn't know that one. it becomes the vm's network card:
-        // none = no card at all, otherwise a card served by that vm (sys-net),
-        // plugged into its vmbr0 by vif-sose
-        if let Some(netvm) = line.strip_prefix("netvm=") {
-            if netvm == "none" {
-                args.push("vif=[]".to_string())
-            } else {
-                let running = running_vms().map_err(|e| e.to_string())?;
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
 
-                if !running.iter().any(|vm| vm == netvm) {
-                    start_vm(netvm)?;
-                    // todo: wait_ready(netvm)?; once wait_ready is finished
-                }
+        match key {
+            "memory" | "vcpus" if value.parse::<u32>().is_ok_and(|n| n > 0) => {
+                args.push(line.to_string());
+            }
+
+            // xl doesn't know netvm, it becomes the vm's network card:
+            // none = no card at all, otherwise a card served by that vm (sys-net),
+            // plugged into its vmbr0 by vif-sose
+            "netvm" if value == "none" => args.push("vif=[]".to_string()),
+            // valid_name matters here: the name goes inside the vif=[...] text
+            "netvm" if valid_name(value) => {
+                // start it first if it isn't running, then always wait until it's
+                // ready. "running" isn't enough, it might still be booting
+                start_vm(value, chain)?;
+                wait_ready(value)?;
 
                 args.push(format!(
-                    "vif=['backend={netvm},bridge=vmbr0,script=vif-sose']"
-                ))
+                    "vif=['backend={value},bridge=vmbr0,script=vif-sose']"
+                ));
             }
-        } else {
-            args.push(line.to_string());
+
+            _ => eprintln!("svmd: {name}: ignoring bad pref line: {line}"),
         }
     }
 
@@ -373,9 +419,14 @@ fn wait_ready(name: &str) -> Result<(), String> {
     let started = Instant::now();
 
     loop {
-        // todo: find the vm's id with domid_of(name)
-        // todo: read /local/domain/<id>/data/ready with xs_request and XS_READ
-        // todo: if that read worked, it's ready: return Ok(())
+        if let Ok(Some(id)) = domid_of(name) {
+            if let Ok(mut stream) = UnixStream::connect(XENSTORED_SOCKET) {
+                let path = format!("/local/domain/{id}/data/ready");
+                if xs_request(&mut stream, XS_READ, &path, &[]).is_ok() {
+                    return Ok(());
+                }
+            }
+        }
 
         if started.elapsed() > Duration::from_secs(30) {
             return Err(format!("{name} didn't get ready in 30 seconds"));
@@ -426,11 +477,16 @@ fn autostart_cmd(arg: &str) -> String {
             }
 
             let text = std::fs::read_to_string(AUTOSTART_FILE).unwrap_or_default();
-            let others = text.lines().filter(|line| line.trim() != name);
+            let others: Vec<&str> = text.lines().filter(|line| line.trim() != name).collect();
 
-            if let Err(e) =
-                std::fs::write(AUTOSTART_FILE, others.collect::<Vec<_>>().join("\n") + "\n")
-            {
+            // an empty list is an empty file, not a file with one blank line
+            let new_text = if others.is_empty() {
+                String::new()
+            } else {
+                others.join("\n") + "\n"
+            };
+
+            if let Err(e) = std::fs::write(AUTOSTART_FILE, new_text) {
                 return format!("err {e}");
             }
             "ok".to_string()
@@ -441,7 +497,8 @@ fn autostart_cmd(arg: &str) -> String {
             let text = std::fs::read_to_string(AUTOSTART_FILE).unwrap_or_default();
             let mut reply = String::new();
 
-            for line in text.lines() {
+            // blank lines are skipped at boot too, so don't show them
+            for line in text.lines().filter(|l| !l.trim().is_empty()) {
                 reply.push_str(&format!("{line}\n"));
             }
 
@@ -490,11 +547,13 @@ fn main() -> std::io::Result<()> {
     let _ = std::fs::remove_file(SVM_SOCK_PATH);
     let listener = UnixListener::bind(SVM_SOCK_PATH)?;
 
-    // Permission bindings so normal users cannot access the svm sock path.
+    // only root can talk to svmd
     set_permissions(SVM_SOCK_PATH, Permissions::from_mode(0o600))?;
 
-    // start the vms listed in the autostart file before taking commands
-    autostart();
+    // start the vms listed in the autostart file. in its own thread, because a vm
+    // that waits for its netvm can take a while, and svm should still answer
+    // during boot
+    thread::spawn(autostart);
 
     for stream in listener.incoming() {
         match stream {

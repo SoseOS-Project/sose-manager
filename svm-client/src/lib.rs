@@ -16,8 +16,9 @@ pub fn svm_request(line: &str) -> std::io::Result<String> {
     for l in BufReader::new(&stream).lines() {
         let l = l?;
         // last line is always ok or err, have to stop there ourselves
-        // since svmd keeps the connection open and lines() would just wait
-        let done = l == "ok" || l.starts_with("err");
+        // since svmd keeps the connection open and lines() would just wait.
+        // "err " with the space: a vm called "errand" in a list isn't the end
+        let done = l == "ok" || l.starts_with("err ");
         reply.push_str(&l);
         reply.push('\n');
         if done {
